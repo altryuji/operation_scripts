@@ -1,0 +1,59 @@
+########### Preliminary check ##########
+
+echo -e "You are going to do the version up operations to the following server (${HEROKU_APP_ORIG})." # with_confirmation
+
+uname -n
+whoami
+
+# Backup Heroku config
+heroku config -s --app ${HEROKU_APP_ORIG} > /var/config_backup/${HEROKU_APP_ORIG}_config_before_release.v${VERSION}.${TODAY}
+
+########## Preliminary check ##########
+
+
+
+########## Server version up operations ##########
+
+# Backup the existing source
+cd ~/src && pwd && GIT_BRANCH="heroku-${HEROKU_APP_ORIG}-backup" && git branch | grep ${GIT_BRANCH}; rc=$? && if [ $rc -eq 0 ]; then git branch -D ${GIT_BRANCH}; else echo "There's no ${GIT_BRANCH}. But no problem."; fi
+cd ~/src && pwd && GIT_BRANCH="heroku-${HEROKU_APP_ORIG}"        && git branch | grep ${GIT_BRANCH}; rc=$? && if [ $rc -eq 0 ]; then git branch -m ${GIT_BRANCH} ${GIT_BRANCH}-backup; else echo "There's no ${GIT_BRANCH}. But no problem."; fi
+
+# Maintenance mode on
+heroku maintenance:on --app ${HEROKU_APP_ORIG} # with_confirmation
+
+# Execute the version up
+cd ~/src && pwd && git push --force heroku-${HEROKU_APP_ORIG} v${VERSION}:master # with_confirmation
+cd ~/src && pwd && heroku config:set COMMIT_HASH=$(git rev-parse --short v${VERSION}) -a ${HEROKU_APP_ORIG}
+
+# Backup the new source
+cd ~/src && pwd && git fetch  heroku-${HEROKU_APP_ORIG}
+cd ~/src && pwd && git branch heroku-${HEROKU_APP_ORIG} heroku-${HEROKU_APP_ORIG}/master
+
+# Database migration
+heroku run rake db:migrate --app ${HEROKU_APP_ORIG} # with_confirmation
+heroku restart --app ${HEROKU_APP_ORIG} # with_confirmation
+
+# Execute ANALYZE and REINDEX
+if [ ${EXECUTE_ANALYZE} == 'true' ]; then ruby ~/src/operation_scripts/sql/analyze.rb -a ${HEROKU_APP_ORIG}; else echo -e "Execute ANALYZE; and/or REINDEX TABLE <table_name>; using heroku pg:psql -app ${HEROKU_APP_ORIG} manually here if you made lots of data correction with heroku run rake db:migrate.\nOTHERWISE, THE SYSTEM MAY SLOW DOWN."; fi # with_confirmation
+
+# Configuration change
+${CHANGE_HEROKU_CONFIG_TO_PROD} # with_confirmation
+heroku config:set VERSION=${VERSION} --app ${HEROKU_APP_ORIG}
+
+# Maintenance mode off
+heroku maintenance:off --app ${HEROKU_APP_ORIG} # with_confirmation
+
+# Backup Heroku config. check that there's no change except COMMIT_HASH if you didn't change the configuration.
+heroku config -s --app ${HEROKU_APP_ORIG} > /var/config_backup/${HEROKU_APP_ORIG}_config_after_release.v${VERSION}.${TODAY}
+diff /var/config_backup/${HEROKU_APP_ORIG}_config_before_release.v${VERSION}.${TODAY} /var/config_backup/${HEROKU_APP_ORIG}_config_after_release.v${VERSION}.${TODAY} | grep -v COMMIT_HASH
+
+# QA check after the version up
+echo -e "Ask the QA team to check that the app is working fine. Rollback the source and database from the backup if the test failed." # with_confirmation
+
+# Check the maintenance time
+echo -e 'The app was in maintenance mode during the following time.'
+grep 'Set maintenance mode' /var/logging/${HEROKU_APP_ORIG}_${TODAY}.log
+
+# Check after the version up
+echo -e "\n -Execute the following command to check if there's no error: tail -f /var/logging/${HEROKU_APP_ORIG}_${TODAY}.log | egrep -i error\n -Check New Relic if there's no performance problem.\n -If there are lots of timeouts and/or 'Backlog too deep' errors, it may be because you forgot to execute ANALYZE; although you made lots of data correction. Then execute ANALYZE; using heroku pg:psql manually now.\n -There could be some request timeouts because requests have been queued while the server was in maintenance mode."
+########## Server version up operations ##########
